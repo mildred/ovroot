@@ -23,11 +23,14 @@ I thought of a solution based on what `mount --rbind` does (as opposed to `mount
 
 Ideas:
 
-- unshare mount namespace
-- prepare a temp dir $tmp
-- mkdir $tmp/root $tmp/merged
-- pivot root $tmp, /root
-- mount overlayfs recursive /root,/root/...upper to /merged
-- chroot /merged
+- unshare mount namespace (might not be needed, but allow nice auto cleanup)
+- prepare a temp dir $tmp (tmpfs)
+- mark it unbindable
+- mkdir $tmp/root $tmp/upper $tmp/work $tmp/merged
+- mount rbind upper to $tmp/upper (could this be skipped?, the upper can perhaps be taken from $/tmp/root/.../upper)
+- pivot root $tmp, /root (only if namespaced)
+- mount rbind / to $tmp/root (if not namespaced)
+- mount overlayfs recursive $tmp/root,$tmp/upper to $tmp/merged
+- chroot or pivot root to $tmp/merged
 
 
