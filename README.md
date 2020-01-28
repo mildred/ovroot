@@ -18,3 +18,5 @@ Limitations
 -----------
 
 Mount point is not cleaned up after operation.
+
+Fix is to `mount("/", MS_SLAVE|MS_REC)` after unshare
