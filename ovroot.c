@@ -1,4 +1,6 @@
 //#define _POSIX_C_SOURCE 200112L // Needed with glibc (e.g., linux).
+#define _GNU_SOURCE
+#include <sched.h>
 #include <linux/limits.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -10,15 +12,12 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#ifndef BIND_ROOT
-#define BIND_ROOT 1
-#endif
-
 static char *sh_argv[] = { "/bin/sh", 0 };
 
 int main (int argc, char *argv[]) {
     const char *root = "/";
-    const char *workdir = 0;
+    const char *relative_workdir = "work";
+    const char *relative_upperdir = "upper";
     const char *overlay = 0;
     int verbose = 0;
     int do_chroot = 1;
@@ -48,8 +47,13 @@ int main (int argc, char *argv[]) {
       new_argv++;
       if (!strcmp(argv[i], "-r")) {
         root = argv[++i];
+        new_argv++;
       } else if (!strcmp(argv[i], "-w")) {
-        workdir = argv[++i];
+        relative_workdir = argv[++i];
+        new_argv++;
+      } else if (!strcmp(argv[i], "-u")) {
+        relative_upperdir = argv[++i];
+        new_argv++;
       } else if (!strcmp(argv[i], "-v")) {
         verbose++;
       } else if (!strcmp(argv[i], "--no-chroot")) {
@@ -62,8 +66,8 @@ int main (int argc, char *argv[]) {
 
     if(!new_argv[0]) new_argv = sh_argv;
 
-    if(!overlay || !workdir) {
-      fprintf(stderr, "usage: ovroot [--no-chroot] [-r ROOT] -w WORKDIR OVERLAY_ROOT [COMMAND...]\n");
+    if(!overlay) {
+      fprintf(stderr, "usage: ovroot [--no-chroot] [-r ROOT] [-w RELATIVE_WORKDIR] [-u RELATIVE_UPPERDIR] OVERLAY [COMMAND...]\n");
       fprintf(stderr, "UID: %d Effective UID: %d\n", uid, euid);
       if(mount_flags & MS_NOSUID) {
         fprintf(stderr, "Filesystem will be mounted nosuid (you are not root)\n", uid, euid);
@@ -71,11 +75,9 @@ int main (int argc, char *argv[]) {
       return 1;
     }
 
-    if(verbose) fprintf(stderr, "Root:  %s\n", root);
-    if(verbose) fprintf(stderr, "Upper: %s\n", overlay);
-
-    char cwd[PATH_MAX];
-    if(getcwd(cwd, PATH_MAX) == 0) perror("getcwd(cwd)");
+    if(verbose) fprintf(stderr, "Root:    %s\n", root);
+    if(verbose) fprintf(stderr, "Overlay: %s\n", overlay);
+    if(verbose) fprintf(stderr, "Tmpfs:   %s\n", tmpdir);
 
     char overlay_absolute[PATH_MAX];
     if(realpath(overlay, overlay_absolute) == 0) {
@@ -93,29 +95,33 @@ int main (int argc, char *argv[]) {
       return 1;
     }
 
-    char workdir_absolute[PATH_MAX];
-    if(realpath(workdir, workdir_absolute) == 0) {
-      char errmsg[PATH_MAX+128];
-      snprintf(errmsg, PATH_MAX+128, "realpath(%s)", workdir);
+    if(unshare(CLONE_NEWNS) == -1) {
+      perror("unshare(CLONE_NEWNS)");
+      return 1;
+    }
+
+    if(mount(overlay_absolute, tmpdir, 0, MS_MGC_VAL|MS_BIND|MS_REC, 0) == -1) {
+      char errmsg[PATH_MAX*2+128];
+      snprintf(errmsg, PATH_MAX+128, "mount rbind %s to %s failed", overlay_absolute, tmpdir);
       perror(errmsg);
       return 1;
     }
 
-    if(verbose) fprintf(stderr, "Tmpfs: %s\n", tmpdir);
-
-    if(mount("tmpfs", tmpdir, "tmpfs", 0, 0) == -1) {
+    if(mount(0, tmpdir, 0, MS_SLAVE|MS_REC, 0) == -1) {
       char errmsg[PATH_MAX+128];
-      snprintf(errmsg, PATH_MAX+128, "mount tmpfs to %s failed", tmpdir);
+      snprintf(errmsg, PATH_MAX+128, "mount make rslave %s failed", tmpdir);
       perror(errmsg);
       return 1;
     }
 
+#if 0
     if(mount(0, tmpdir, 0, MS_UNBINDABLE, 0) == -1) {
       char errmsg[PATH_MAX+128];
       snprintf(errmsg, PATH_MAX+128, "mount make runbindable %s failed", tmpdir);
       perror(errmsg);
       return 1;
     }
+#endif
 
     if(chdir(tmpdir) == -1) {
       char errmsg[PATH_MAX+128];
@@ -125,18 +131,16 @@ int main (int argc, char *argv[]) {
     }
 
     char tmpdir_work[PATH_MAX];
-    snprintf(tmpdir_work, PATH_MAX, "%s/work", tmpdir);
+    snprintf(tmpdir_work, PATH_MAX, "%s/%s", tmpdir, relative_workdir);
     mkdir(tmpdir_work, 0700);
 
-#if BIND_ROOT
     char tmpdir_root[PATH_MAX];
     snprintf(tmpdir_root, PATH_MAX, "%s/root", tmpdir);
     mkdir(tmpdir_root, 0700);
 
     char tmpdir_upper[PATH_MAX];
-    snprintf(tmpdir_upper, PATH_MAX, "%s/upper", tmpdir);
+    snprintf(tmpdir_upper, PATH_MAX, "%s/%s", tmpdir, relative_upperdir);
     mkdir(tmpdir_upper, 0700);
-#endif
 
     char tmpdir_merged[PATH_MAX];
     snprintf(tmpdir_merged, PATH_MAX, "%s/merged", tmpdir);
@@ -145,50 +149,50 @@ int main (int argc, char *argv[]) {
     long mount_len = PATH_MAX * 3 + 1024;
     char mount_opts[mount_len];
     snprintf(mount_opts, mount_len, "lowerdir=%s,upperdir=%s,workdir=%s",
-#if BIND_ROOT
       tmpdir_root, tmpdir_upper,
-#else
-      root_absolute, overlay_absolute,
-#endif
       tmpdir_work);
 
     while(umount(tmpdir_merged) != -1);
 
-#if BIND_ROOT
     if(mount(root_absolute, tmpdir_root, 0, MS_MGC_VAL|MS_BIND|MS_REC, 0) == -1) {
       perror("Failed to rbind mount the root filesystem");
       return 1;
     }
 
-    if(mount(workdir_absolute, tmpdir_work, 0, MS_MGC_VAL|MS_BIND|MS_REC, 0) == -1) {
-      perror("Failed to rbind mount the workdir");
+    if(mount(0, tmpdir_root, 0, MS_SLAVE|MS_REC, 0) == -1) {
+      char errmsg[PATH_MAX+128];
+      snprintf(errmsg, PATH_MAX+128, "mount make rslave %s failed", tmpdir_root);
+      perror(errmsg);
       return 1;
     }
-
-    if(mount(overlay_absolute, tmpdir_upper, 0, MS_MGC_VAL|MS_BIND|MS_REC, 0) == -1) {
-      perror("Failed to rbind mount the upper filesystem");
-      return 1;
-    }
-#endif
 
     if(mount("overlay", tmpdir_merged, "overlay", mount_flags, mount_opts) == -1) {
-      perror("Failed to mount the overlay filesystem");
+      char errmsg[PATH_MAX*6+256];
+      snprintf(errmsg, PATH_MAX*6+256, "mount(overlay, %s, overlay, %ud, %s)", tmpdir_merged, mount_flags, mount_opts);
+      perror(errmsg);
       return 1;
     }
 
-    if(chroot(tmpdir_merged) == -1) {
-      char errmsg[PATH_MAX+32];
-      snprintf(errmsg, PATH_MAX+32, "chroot(%s)", tmpdir_merged);
-      perror(errmsg);
-      goto cleanup_mount;
-    }
+    if(do_chroot) {
+        if(chroot(tmpdir_merged) == -1) {
+          char errmsg[PATH_MAX+32];
+          snprintf(errmsg, PATH_MAX+32, "chroot(%s)", tmpdir_merged);
+          perror(errmsg);
+          goto cleanup_mount;
+        }
 
-    chdir("/");
+        chdir("/");
 
-    if(chdir(newcwd) == -1) {
-      char errmsg[PATH_MAX+32];
-      snprintf(errmsg, PATH_MAX+32, "chdir(%s)", newcwd);
-      perror(errmsg);
+#if 0
+        if(chdir(newcwd) == -1) {
+          char errmsg[PATH_MAX+32];
+          snprintf(errmsg, PATH_MAX+32, "chdir(%s)", newcwd);
+          perror(errmsg);
+          goto cleanup_mount;
+        }
+#endif
+    } else {
+        fprintf(stdout, "%s\n", tmpdir_merged);
     }
 
     if(seteuid(uid) == -1) {
@@ -212,41 +216,9 @@ cleanup_mount:
       perror(errmsg);
     }
 
-#if BIND_ROOT
-    if(umount(tmpdir_upper) == -1 && errno != EINVAL) {
-      char errmsg[PATH_MAX+32];
-      snprintf(errmsg, PATH_MAX+32, "umount(%s)", tmpdir_upper);
-      perror(errmsg);
-    }
-
     if(umount(tmpdir_root) == -1 && errno != EINVAL) {
       char errmsg[PATH_MAX+32];
       snprintf(errmsg, PATH_MAX+32, "umount(%s)", tmpdir_root);
-      perror(errmsg);
-    }
-
-    if(rmdir(tmpdir_upper) == -1) {
-      char errmsg[PATH_MAX+32];
-      snprintf(errmsg, PATH_MAX+32, "rmdir(%s)", tmpdir_upper);
-      perror(errmsg);
-    }
-
-    if(rmdir(tmpdir_root) == -1) {
-      char errmsg[PATH_MAX+32];
-      snprintf(errmsg, PATH_MAX+32, "rmdir(%s)", tmpdir_root);
-      perror(errmsg);
-    }
-#endif
-
-    if(rmdir(tmpdir_work) == -1) {
-      char errmsg[PATH_MAX+32];
-      snprintf(errmsg, PATH_MAX+32, "rmdir(%s)", tmpdir_work);
-      perror(errmsg);
-    }
-
-    if(rmdir(tmpdir_merged) == -1) {
-      char errmsg[PATH_MAX+32];
-      snprintf(errmsg, PATH_MAX+32, "rmdir(%s)", tmpdir_merged);
       perror(errmsg);
     }
 
