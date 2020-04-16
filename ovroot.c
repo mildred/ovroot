@@ -21,6 +21,7 @@ int main (int argc, char *argv[]) {
     const char *overlay = 0;
     int verbose = 0;
     int do_chroot = 1;
+    int do_chdir = 1;
 
     char* sys_tmpdir = getenv("TMPDIR");
     char tmpdir_template[PATH_MAX];
@@ -34,7 +35,10 @@ int main (int argc, char *argv[]) {
     }
 
     char newcwd[PATH_MAX];
-    getcwd(newcwd, PATH_MAX);
+    if(getcwd(newcwd, PATH_MAX) == 0){
+        perror("getcwd");
+        return 1;
+    }
 
     char **new_argv = argv + 1;
 
@@ -58,6 +62,8 @@ int main (int argc, char *argv[]) {
         verbose++;
       } else if (!strcmp(argv[i], "--no-chroot")) {
         do_chroot = 0;
+      } else if (!strcmp(argv[i], "--no-chdir")) {
+        do_chdir = 0;
       } else {
         overlay = argv[i];
         break;
@@ -67,7 +73,7 @@ int main (int argc, char *argv[]) {
     if(!new_argv[0]) new_argv = sh_argv;
 
     if(!overlay) {
-      fprintf(stderr, "usage: ovroot [--no-chroot] [-r ROOT] [-w RELATIVE_WORKDIR] [-u RELATIVE_UPPERDIR] OVERLAY [COMMAND...]\n");
+      fprintf(stderr, "usage: ovroot [--no-chroot] [--no-chdir] [-r ROOT] [-w RELATIVE_WORKDIR] [-u RELATIVE_UPPERDIR] OVERLAY [COMMAND...]\n");
       fprintf(stderr, "UID: %d Effective UID: %d\n", uid, euid);
       if(mount_flags & MS_NOSUID) {
         fprintf(stderr, "Filesystem will be mounted nosuid (you are not root)\n", uid, euid);
@@ -100,6 +106,11 @@ int main (int argc, char *argv[]) {
       return 1;
     }
 
+    if(mount(0, "/", 0, MS_SLAVE|MS_REC, 0) == -1) {
+      perror("mount make rslave / failed");
+      return 1;
+    }
+
     if(mount(overlay_absolute, tmpdir, 0, MS_MGC_VAL|MS_BIND|MS_REC, 0) == -1) {
       char errmsg[PATH_MAX*2+128];
       snprintf(errmsg, PATH_MAX+128, "mount rbind %s to %s failed", overlay_absolute, tmpdir);
@@ -113,15 +124,6 @@ int main (int argc, char *argv[]) {
       perror(errmsg);
       return 1;
     }
-
-#if 0
-    if(mount(0, tmpdir, 0, MS_UNBINDABLE, 0) == -1) {
-      char errmsg[PATH_MAX+128];
-      snprintf(errmsg, PATH_MAX+128, "mount make runbindable %s failed", tmpdir);
-      perror(errmsg);
-      return 1;
-    }
-#endif
 
     if(chdir(tmpdir) == -1) {
       char errmsg[PATH_MAX+128];
@@ -183,16 +185,21 @@ int main (int argc, char *argv[]) {
 
         chdir("/");
 
-#if 0
-        if(chdir(newcwd) == -1) {
+        if(do_chdir){
+            if(chdir(newcwd) == -1) {
+              char errmsg[PATH_MAX+32];
+              snprintf(errmsg, PATH_MAX+32, "chdir(%s)", newcwd);
+              perror(errmsg);
+              goto cleanup_mount;
+            }
+        }
+    } else if (do_chdir){
+        if(chdir(tmpdir_merged) == -1) {
           char errmsg[PATH_MAX+32];
-          snprintf(errmsg, PATH_MAX+32, "chdir(%s)", newcwd);
+          snprintf(errmsg, PATH_MAX+32, "chdir(%s)", tmpdir_merged);
           perror(errmsg);
           goto cleanup_mount;
         }
-#endif
-    } else {
-        fprintf(stdout, "%s\n", tmpdir_merged);
     }
 
     if(seteuid(uid) == -1) {
